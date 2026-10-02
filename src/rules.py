@@ -49,6 +49,65 @@ def magnitude_median(amplitudes):
     return (values[middle - 1] + values[middle]) / 2.0
 
 
+def dedupe_by_station(reports):
+    """Keep a single report per station, preserving first occurrence order."""
+    seen = set()
+    result = []
+    for report in reports:
+        key = report.get("station")
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(report)
+    return result
+
+
+def merge_reports(target_reports, source_reports):
+    """Union two report sets and drop duplicate station reports."""
+    return dedupe_by_station(list(target_reports or []) + list(source_reports or []))
+
+
+def report_amplitudes(reports):
+    values = []
+    for report in reports or []:
+        amplitude = report.get("amplitude")
+        if amplitude is not None and amplitude != "":
+            values.append(float(amplitude))
+    return values
+
+
+def magnitude_from_reports(reports):
+    """Recompute magnitude as the median of report amplitudes.
+
+    Returns None when no amplitude is available so callers can leave the
+    existing magnitude untouched.
+    """
+    values = report_amplitudes(reports)
+    if not values:
+        return None
+    return round(magnitude_median(values), 2)
+
+
+def split_reports(reports, report_ids):
+    """Partition reports into (kept, moved) by report id."""
+    selected = {str(value) for value in (report_ids or [])}
+    moved = []
+    keep = []
+    for report in reports or []:
+        if str(report.get("id")) in selected:
+            moved.append(report)
+        else:
+            keep.append(report)
+    return keep, moved
+
+
+def post_event_status(current):
+    """Reports changed after publish: the event must go back to pending review."""
+    if current in ("published", "revised"):
+        return "associated"
+    return current
+
+
 CUSTOM_CREATE = {'station': _validate_station, 'event': _validate_event}
 CUSTOM_TRANSITIONS = {('event', 'associate'): _validate_associate}
 
@@ -60,7 +119,7 @@ class RuleEngine:
     CREATE_REQUIRED = {'station': ('code', 'lat', 'lon'), 'event': ('title', 'origin_time', 'location', 'reports')}
     ACTION_REQUIRED = {('station', 'offline'): ('reason',), ('event', 'review'): ('reviewer', 'magnitude'), ('event', 'publish'): ('communication_id',), ('event', 'revise'): ('reason', 'magnitude'), ('event', 'withdraw'): ('reason',)}
     CREATE_ROLES = {'station': ('admin', 'station'), 'event': ('admin', 'analyst')}
-    ROLE_ACTIONS = {'offline': ('admin', 'station'), 'online': ('admin', 'station'), 'associate': ('admin', 'analyst'), 'review': ('admin', 'reviewer'), 'publish': ('admin', 'reviewer'), 'revise': ('admin', 'reviewer'), 'withdraw': ('admin', 'reviewer')}
+    ROLE_ACTIONS = {'offline': ('admin', 'station'), 'online': ('admin', 'station'), 'associate': ('admin', 'analyst'), 'review': ('admin', 'reviewer'), 'publish': ('admin', 'reviewer'), 'revise': ('admin', 'reviewer'), 'withdraw': ('admin', 'reviewer'), 'merge': ('admin', 'analyst'), 'split': ('admin', 'analyst')}
 
     def normalize_kind(self, kind):
         return self.ALIASES.get(kind, kind)
@@ -115,6 +174,36 @@ class RuleEngine:
         if extra:
             patch.update(extra)
         return next_status, patch
+
+    def validate_merge(self, actor, target, source):
+        """Validate that two events can be merged into one."""
+        self._ensure_role(actor, self.ROLE_ACTIONS.get(("event", "merge"), ("admin", "analyst")))
+        if target["kind"] != "event" or source["kind"] != "event":
+            raise ValidationError("merge requires two events")
+        if target["id"] == source["id"]:
+            raise ValidationError("cannot merge an event with itself")
+        for label, event in (("target", target), ("source", source)):
+            merged_into = (event.get("data") or {}).get("merged_into")
+            if event["status"] == "merged" or merged_into:
+                raise ConflictError(
+                    "%s event %s already merged into %s"
+                    % (label, event["id"], merged_into)
+                )
+        return True
+
+    def validate_split(self, actor, event, report_ids):
+        """Validate that selected reports can be split out of an event."""
+        self._ensure_role(actor, self.ROLE_ACTIONS.get(("event", "split"), ("admin", "analyst")))
+        if event["kind"] != "event":
+            raise ValidationError("split requires an event")
+        if event["status"] == "merged" or (event.get("data") or {}).get("merged_into"):
+            raise ConflictError(
+                "event %s already merged into %s"
+                % (event["id"], (event.get("data") or {}).get("merged_into"))
+            )
+        if not report_ids:
+            raise ValidationError("report_ids are required for split")
+        return True
 
 
 def _find_one(lookup, kind, field, value):

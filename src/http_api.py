@@ -85,6 +85,13 @@ def create_handler(service, rules, static_dir):
                         return self._send_html(200, handle.read())
                 if parts == ["api", "audit"]:
                     return self._send(200, {"items": service.audit_log()})
+                if len(parts) == 4 and parts[:2] == ["api", "entities"] and parts[3] == "versions":
+                    return self._send(200, {"items": service.list_versions(parts[2])})
+                if len(parts) == 5 and parts[:2] == ["api", "entities"] and parts[3] == "versions":
+                    version = service.get_version(parts[2], parts[4])
+                    if not version:
+                        raise NotFoundError("version not found: " + parts[4])
+                    return self._send(200, version)
                 if len(parts) == 3 and parts[:2] == ["api", "entities"]:
                     return self._send(200, service.get(parts[2]))
                 if len(parts) >= 2 and parts[0] == "api":
@@ -138,6 +145,8 @@ def create_handler(service, rules, static_dir):
                         200,
                         service.transition(actor, parts[2], parts[3], self._body(), None),
                     )
+                if len(parts) == 3 and parts == ["api", "backfill", "magnitudes"]:
+                    return self._send(200, service.backfill_magnitudes(actor))
                 if len(parts) == 2 and parts[0] == "api":
                     body = self._body()
                     idem = self.headers.get("Idempotency-Key")
