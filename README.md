@@ -33,9 +33,30 @@ python3 app.py --db ./data.db --port 8307
 - `POST /api/<kind>`：创建对象；请求体为JSON。
 - `GET /api/entities/<id>`：读取对象当前版本。
 - `POST /api/entities/<id>/actions`：提交`{"action":"动作名","data":{...},"expected_version":数字}`。
+- `POST /api/maintenance/backfill-magnitudes`：按报文回填旧事件缺失的震级（仅admin）。
 - `GET /api/audit`：读取审计记录。
 
 请求身份通过`X-User-Id`和`X-Role`请求头传入。创建和动作的可执行角色由规则引擎控制。
+
+## 事件合并与拆分
+
+分析员可能对同一次地震各建一条候选事件（需要合并），也可能把两场地震并成了一条（需要拆分）。两个动作都通过`POST /api/entities/<id>/actions`提交，可执行角色为`admin`和`analyst`。
+
+- **合并**：`{"action":"merge","data":{"source_id":"被并事件id","reason":"..."}}`，提交到幸存事件上。被并事件状态变为`merged`，其`merged_into`指向幸存事件。
+- **拆分**：`{"action":"split","data":{"stations":["要转出的台站",...],"target_id":"既有事件id"}}`转到既有事件；或把`target_id`换成`"new_event":{"title":"...","id":"可选"}`新建候选事件。
+
+语义规则：
+
+- 一份报文只归一个事件：合并后被并事件不再持有报文；拆分选中的报文从源事件转到目标事件。
+- 合并（及拆到既有事件）时同台站重复报文只留一份，保留幸存事件原有报文。
+- 报文集合一变动就按现有报文中的震级取中位数重算事件震级；报文没有震级时保留原值。
+- 任一边发布过（`published`/`revised`），幸存事件退回待复核（`associated`），需重新复核发布；先前外发内容以旧版形式留在`previous_publications`里。
+- 合并和拆分在单个事务里完成并按乐观锁校验版本：两人同时提交同一对事件的合并，先提交的生效，后提交的收到409并能看到并到了哪条。
+- 拆分要求源事件至少保留两条报文；新建事件至少转入两条报文。
+
+## 旧数据震级回填
+
+`POST /api/maintenance/backfill-magnitudes`（仅admin）扫描所有事件：事件缺震级且报文带震级时，按报文中位数回填并写审计；已有震级或报文无震级的事件不动。启动时加`--backfill-magnitudes`可在服务起来前先跑一遍回填。
 
 ## 测试
 

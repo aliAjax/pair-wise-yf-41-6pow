@@ -140,6 +140,49 @@ class SQLiteRepository:
             connection.close()
         return self.get_entity(entity_id)
 
+    def apply_changes(self, creations=(), updates=()):
+        """在单个事务里创建并更新多个实体，更新按乐观锁校验版本。
+
+        creations: (id, kind, status, data, actor_id) 元组列表。
+        updates: (id, expected_version, status, data) 元组列表。
+        任一项失败则整体回滚，用于合并/拆分这类跨事件操作。
+        """
+        now = utcnow()
+        connection = self._connect()
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            for entity_id, kind, status, data, actor_id in creations:
+                payload = json.dumps(data, ensure_ascii=False, sort_keys=True)
+                connection.execute(
+                    "INSERT INTO entities(id, kind, status, version, data, created_by, created_at, updated_at) "
+                    "VALUES (?, ?, ?, 1, ?, ?, ?, ?)",
+                    (entity_id, kind, status, payload, actor_id, now, now),
+                )
+            for entity_id, expected_version, status, data in updates:
+                payload = json.dumps(data, ensure_ascii=False, sort_keys=True)
+                row = connection.execute(
+                    "SELECT version FROM entities WHERE id = ?", (entity_id,)
+                ).fetchone()
+                if not row:
+                    raise NotFoundError("entity not found: " + entity_id)
+                current_version = int(row["version"])
+                if expected_version is not None and current_version != int(expected_version):
+                    raise ConflictError(
+                        "version conflict: expected %s, found %s"
+                        % (expected_version, current_version)
+                    )
+                connection.execute(
+                    "UPDATE entities SET status = ?, version = version + 1, data = ?, updated_at = ? "
+                    "WHERE id = ? AND version = ?",
+                    (status, payload, now, entity_id, current_version),
+                )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
     def append_audit(self, entity_id, actor_id, actor_role, action, from_status, to_status, detail):
         with self._connect() as connection:
             connection.execute(

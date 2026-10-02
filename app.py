@@ -3,6 +3,7 @@ import signal
 import sys
 from pathlib import Path
 
+from src.domain import Actor
 from src.http_api import create_server
 from src.repository import SQLiteRepository
 from src.rules import RuleEngine
@@ -14,11 +15,19 @@ def main(argv=None):
     parser.add_argument("--db", default="./data.db", help="SQLite database path")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8307)
+    parser.add_argument(
+        "--backfill-magnitudes",
+        action="store_true",
+        help="启动前按报文回填旧事件缺失的震级",
+    )
     args = parser.parse_args(argv)
 
     repository = SQLiteRepository(args.db)
     rules = RuleEngine()
     service = DomainService(repository, rules)
+    if args.backfill_magnitudes:
+        filled = service.backfill_magnitudes(Actor("system", "admin"))
+        print("backfilled magnitudes for %d events" % len(filled), flush=True)
     static_dir = Path(__file__).resolve().parent / "static"
     server = create_server(args.host, args.port, service, rules, str(static_dir))
 
